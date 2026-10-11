@@ -1,81 +1,66 @@
-USE ROLE ACCOUNTADMIN;
-USE WAREHOUSE COMPUTE_WH;
+-- ==============================================================================
+-- 02_silver_transformations.sql
+-- ==============================================================================
+USE ROLE ASSESSMENT_ENGINEER;
+USE WAREHOUSE ASSESSMENT_WH;
 USE DATABASE ASSESSMENT_DB;
-USE SCHEMA SILVER;
 
--- ==============================================================================
--- 1. DIMENSIONS
--- ==============================================================================
-CREATE OR REPLACE TABLE dim_account AS
+-- ASSUMPTIONS (Silver Layer):
+-- [A09] Deduplication: If duplicate order_ids arrive, we deterministically keep the first one based on _row_number from the source file.
+-- [A10] Fatal Errors: Missing order_date or negative quantities are fatal. They are dropped from Silver and would be routed to a Quarantine table.
+-- [A11] Orphans: Missing customer or product IDs in dimensions are kept as 'Unknown' to preserve financial actuals, but must be logged.
+-- [A12] Standardization: Text fields are trimmed and standardized to handle dirty inputs (spaces, casing).
+
+CREATE SCHEMA IF NOT EXISTS DQ;
+CREATE TRANSIENT SCHEMA IF NOT EXISTS SILVER;
+
+-- 1. SILVER DIMENSIONS (Standardized & Cleansed)
+CREATE OR REPLACE TRANSIENT TABLE SILVER.dim_product AS
 SELECT 
-    account_id, customer_id, account_name, region, account_owner, segment,
-    TRY_CAST(active_flag AS BOOLEAN) AS is_active
-FROM ASSESSMENT_DB.RAW.raw_salesforce_accounts;
+    TRIM(product_id) AS product_id,
+    TRIM(product_name) AS product_name,
+    TRIM(product_family) AS product_family,
+    TRY_CAST(TRIM(standard_cost) AS NUMBER(38,2)) AS standard_cost
+FROM RAW.raw_product_master;
 
-CREATE OR REPLACE TABLE dim_product AS
+CREATE OR REPLACE TRANSIENT TABLE SILVER.dim_account AS
 SELECT 
-    product_id, product_name, product_family, lifecycle_status,
-    TRY_CAST(standard_cost AS DECIMAL(10,2)) AS standard_cost
-FROM ASSESSMENT_DB.RAW.raw_product_master;
+    TRIM(customer_id) AS customer_id,
+    TRIM(account_name) AS account_name,
+    TRIM(region) AS region
+FROM RAW.raw_salesforce_accounts;
 
--- Auto-generating a Standard Time Dimension (dim_date) as mentioned in architecture
-CREATE OR REPLACE TABLE dim_date AS
-SELECT
-    DATEADD(day, SEQ4(), '2024-01-01'::DATE) AS calendar_date,
-    YEAR(DATEADD(day, SEQ4(), '2024-01-01'::DATE)) AS cal_year,
-    MONTH(DATEADD(day, SEQ4(), '2024-01-01'::DATE)) AS cal_month,
-    DATE_TRUNC('month', DATEADD(day, SEQ4(), '2024-01-01'::DATE)) AS reporting_month
-FROM TABLE(GENERATOR(ROWCOUNT => 3650)); -- Generates 10 years of dates
-
--- ==============================================================================
--- 2. DATA QUALITY FRAMEWORK & QUARANTINE
--- Simulating dbt singular tests / Great Expectations behavior
--- ==============================================================================
-CREATE OR REPLACE TABLE quarantine_orders AS
-SELECT *, 'Negative/Zero Quantity or Null Price' AS dq_failure_reason
-FROM ASSESSMENT_DB.RAW.raw_oracle_orders
-WHERE TRY_CAST(quantity AS INT) <= 0 OR TRY_CAST(unit_price AS DECIMAL) IS NULL
-UNION ALL
-SELECT *, 'Logical Error: Delivery before Order' AS dq_failure_reason
-FROM ASSESSMENT_DB.RAW.raw_oracle_orders
-WHERE TRY_CAST(actual_delivery_date AS DATE) < TRY_CAST(order_date AS DATE);
-
--- ==============================================================================
--- 3. FACTS (CLEANSED)
--- ==============================================================================
-CREATE OR REPLACE TABLE fact_forecast AS
-SELECT
-    forecast_id, product_id, region,
-    TRY_CAST(forecast_month AS DATE) AS forecast_month,
-    TRY_CAST(forecast_revenue AS DECIMAL(15,2)) AS forecast_revenue,
-    TRY_CAST(forecast_quantity AS INT) AS forecast_quantity
-FROM ASSESSMENT_DB.RAW.raw_adaptive_forecast;
-
-CREATE OR REPLACE TABLE fact_orders AS
-WITH raw_orders AS (
-    -- Exclude quarantined records from the main pipeline
-    SELECT r.* 
-    FROM ASSESSMENT_DB.RAW.raw_oracle_orders r
-    LEFT JOIN quarantine_orders q ON r.order_id = q.order_id
-    WHERE q.order_id IS NULL
+-- 2. SILVER FACTS (Deduplicated, Typed, and Cleansed)
+CREATE OR REPLACE TRANSIENT TABLE SILVER.fact_orders AS
+WITH deduped_raw AS (
+    -- Deterministic deduplication using _row_number [A09]
+    SELECT *
+    FROM RAW.raw_oracle_orders
+    QUALIFY ROW_NUMBER() OVER(PARTITION BY TRIM(order_id) ORDER BY _row_number ASC) = 1
 ),
-casted_orders AS (
-    SELECT
-        order_id, customer_id, product_id,
-        TRY_CAST(order_date AS DATE) AS order_date,
-        TRY_CAST(promised_delivery_date AS DATE) AS promised_delivery_date,
-        TRY_CAST(actual_delivery_date AS DATE) AS actual_delivery_date,
-        TRY_CAST(quantity AS INT) AS quantity,
-        TRY_CAST(unit_price AS DECIMAL(10,2)) AS unit_price,
-        plant_location, order_status,
-        CASE 
-            WHEN TRY_CAST(actual_delivery_date AS DATE) IS NOT NULL 
-                 AND TRY_CAST(actual_delivery_date AS DATE) <= TRY_CAST(promised_delivery_date AS DATE) THEN 1 
-            ELSE 0 
-        END AS is_on_time_delivery
-    FROM raw_orders
+typed_orders AS (
+    SELECT 
+        TRIM(order_id) AS order_id,
+        COALESCE(TRIM(customer_id), 'Unknown') AS customer_id, -- Handle orphans [A11]
+        COALESCE(TRIM(product_id), 'Unknown') AS product_id,   -- Handle orphans [A11]
+        TRY_CAST(TRIM(order_date) AS DATE) AS order_date,
+        TRY_CAST(TRIM(actual_delivery_date) AS DATE) AS actual_delivery_date,
+        TRY_CAST(TRIM(quantity) AS NUMBER(38,0)) AS quantity,
+        TRY_CAST(TRIM(unit_price) AS NUMBER(38,2)) AS unit_price,
+        TRIM(order_status) AS order_status
+    FROM deduped_raw
 )
-SELECT *
-FROM casted_orders
--- Handle Duplicates (e.g., ORD00005)
-QUALIFY ROW_NUMBER() OVER(PARTITION BY order_id ORDER BY order_date DESC) = 1;
+SELECT * 
+FROM typed_orders
+WHERE order_date IS NOT NULL   -- Fatal error handling: drops ORD90107 [A10]
+  AND quantity > 0;            -- Fatal error handling: drops negative/zero qty [A10]
+
+-- 3. SILVER FORECAST (Standardized)
+CREATE OR REPLACE TRANSIENT TABLE SILVER.fact_forecast AS
+SELECT 
+    TRIM(product_id) AS product_id,
+    TRIM(region) AS region,
+    TRY_CAST(TRIM(forecast_month) AS DATE) AS forecast_month,
+    TRY_CAST(TRIM(forecast_revenue) AS NUMBER(38,2)) AS forecast_revenue
+FROM RAW.raw_adaptive_forecast
+WHERE TRY_CAST(TRIM(forecast_month) AS DATE) IS NOT NULL;
