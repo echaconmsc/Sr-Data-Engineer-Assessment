@@ -12,7 +12,10 @@ USE DATABASE ASSESSMENT_DB;
 
 CREATE TRANSIENT SCHEMA IF NOT EXISTS ANALYTICS;
 
+-- ==============================================================================
 -- 1. AGGREGATE ACTUALS (Rolled up to Month, Region, Product)
+-- ==============================================================================
+
 CREATE OR REPLACE TRANSIENT TABLE ANALYTICS.mart_revenue_performance AS
 WITH monthly_actuals AS (
     SELECT 
@@ -34,7 +37,10 @@ WITH monthly_actuals AS (
     GROUP BY 1, 2, 3
 ),
 
+-- ==============================================================================
 -- 2. AGGREGATE FORECAST
+-- ==============================================================================
+
 monthly_forecast AS (
     SELECT 
         forecast_month AS reporting_month,
@@ -45,7 +51,9 @@ monthly_forecast AS (
     GROUP BY 1, 2, 3
 )
 
+-- ==============================================================================
 -- 3. FINAL MART (Full Outer Join for completeness)
+-- ==============================================================================
 SELECT 
     COALESCE(act.reporting_month, fcst.reporting_month) AS reporting_month,
     COALESCE(act.region, fcst.region) AS region,
