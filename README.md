@@ -21,10 +21,10 @@ SILVER -> Typed, cleansed dimensions and facts. Schema is TRANSIENT.
      v
 ANALYTICS (Gold) -> Business mart (`mart_revenue_performance`). Schema is TRANSIENT.
 
+```
 
 ## 2. Data Model & Grain Declaration
 The proposed model is a **Star Schema** optimized for high-performance analytical queries in Snowflake.
-```
 
 *   **`RAW` tables:** Transactional (1:1 with source files).
 *   **`SILVER.dim_account`:** Customer details, region, and segment.
