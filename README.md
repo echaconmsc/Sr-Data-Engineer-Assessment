@@ -9,6 +9,7 @@ This repository contains the technical assessment for the Senior Data Engineer r
 ## 1. End-to-End Architecture & Flow
 For this Snowflake analytical solution, I am proposing a **Medallion Architecture (Bronze/Raw, Silver, Gold)**. This structure guarantees data lineage, error isolation, and analytical flexibility.
 
+```
 [CSV Files] -> STG_LANDING (Internal Stage)
      | (COPY INTO with Lineage: _source_file, _row_number, _loaded_at)
      v
@@ -23,6 +24,7 @@ ANALYTICS (Gold) -> Business mart (`mart_revenue_performance`). Schema is TRANSI
 
 ## 2. Data Model & Grain Declaration
 The proposed model is a **Star Schema** optimized for high-performance analytical queries in Snowflake.
+```
 
 *   **`RAW` tables:** Transactional (1:1 with source files).
 *   **`SILVER.dim_account`:** Customer details, region, and segment.
