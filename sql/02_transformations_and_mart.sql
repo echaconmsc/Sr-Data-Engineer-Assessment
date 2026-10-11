@@ -14,7 +14,10 @@ USE DATABASE ASSESSMENT_DB;
 CREATE SCHEMA IF NOT EXISTS DQ;
 CREATE TRANSIENT SCHEMA IF NOT EXISTS SILVER;
 
+-- ==============================================================================
 -- 1. SILVER DIMENSIONS (Standardized & Cleansed)
+-- ==============================================================================
+
 CREATE OR REPLACE TRANSIENT TABLE SILVER.dim_product AS
 SELECT 
     TRIM(product_id) AS product_id,
@@ -30,7 +33,10 @@ SELECT
     TRIM(region) AS region
 FROM RAW.raw_salesforce_accounts;
 
+-- ==============================================================================
 -- 2. SILVER FACTS (Deduplicated, Typed, and Cleansed)
+-- ==============================================================================
+
 CREATE OR REPLACE TRANSIENT TABLE SILVER.fact_orders AS
 WITH deduped_raw AS (
     -- Deterministic deduplication using _row_number [A09]
@@ -55,7 +61,10 @@ FROM typed_orders
 WHERE order_date IS NOT NULL   -- Fatal error handling: drops ORD90107 [A10]
   AND quantity > 0;            -- Fatal error handling: drops negative/zero qty [A10]
 
+-- ==============================================================================
 -- 3. SILVER FORECAST (Standardized)
+-- ==============================================================================
+
 CREATE OR REPLACE TRANSIENT TABLE SILVER.fact_forecast AS
 SELECT 
     TRIM(product_id) AS product_id,
